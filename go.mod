@@ -7,6 +7,7 @@ require github.com/hashicorp/raft v1.7.3
 require (
 	github.com/boltdb/bolt v1.3.1 // indirect
 	github.com/hashicorp/go-msgpack v0.5.5 // indirect
+	github.com/joho/godotenv v1.5.1 // indirect
 )
 
 require (

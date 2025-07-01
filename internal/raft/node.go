@@ -39,14 +39,23 @@ func NewNode(dataDir string, nodeID string, bindAddr string, peers []string) (*R
 
 	// bootstrap cluster if first node
 	if len(peers) == 0 {
-		cfg := raft.Configuration{
-			Servers: []raft.Server{{
-				ID:      config.LocalID,
-				Address: transport.LocalAddr(),
-			}},
+		// check if this is the first node by getting the current configuration
+		future := raftNode.GetConfiguration()
+		if err := future.Error(); err != nil {
+			return nil, fmt.Errorf("failed to get raft config: %w", err)
 		}
-		if err := raftNode.BootstrapCluster(cfg).Error(); err != nil {
-			return nil, fmt.Errorf("failed to bootstrap cluster: %w", err)
+
+		// only bootstrap if no servers are configured yet
+		if len(future.Configuration().Servers) == 0 {
+			cfg := raft.Configuration{
+				Servers: []raft.Server{{
+					ID:      config.LocalID,
+					Address: transport.LocalAddr(),
+				}},
+			}
+			if err := raftNode.BootstrapCluster(cfg).Error(); err != nil {
+				return nil, fmt.Errorf("failed to bootstrap cluster: %w", err)
+			}
 		}
 	}
 
