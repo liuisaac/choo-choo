@@ -1,3 +1,6 @@
+// File: cmd/server/main.go
+// - main server binary for ChooChoo
+
 package main
 
 import (

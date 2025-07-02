@@ -2,88 +2,82 @@ package api
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"time"
 
-	"github.com/hashicorp/raft"
-	raftnode "github.com/liuisaac/choo-choo/internal/raft"
+	"github.com/gin-gonic/gin" // using gin for HTTP server
+	db "github.com/liuisaac/choo-choo/internal/kv"
+	node "github.com/liuisaac/choo-choo/internal/raft"
+	"github.com/liuisaac/choo-choo/internal/parser"
 )
 
-type HTTPServer struct {
-	Node *raftnode.RaftNode
+// QueryRequest represents the JSON structure for incoming query requests
+// it expects a single field "q" which is the query string (ie: {"q": "SET key value"})
+type QueryRequest struct {
+	Q string `json:"q"`
 }
 
-func New(node *raftnode.RaftNode) *HTTPServer {
-	return &HTTPServer{Node: node}
+type HTTPServer struct {
+	node *node.RaftNode
+}
+
+func New(node *node.RaftNode) *HTTPServer {
+	return &HTTPServer{node: node}
 }
 
 func (s *HTTPServer) Start(addr string) error {
-	http.HandleFunc("/get", s.get)
-	http.HandleFunc("/set", s.set)
-	http.HandleFunc("/delete", s.delete)
-	http.HandleFunc("/join", s.join)
-	return http.ListenAndServe(addr, nil)
+    r := gin.Default()
+
+    r.POST("/query", s.handleQuery)
+
+    return r.Run(addr) // keeps the server running at addr (e.g. ":8080")
 }
 
-func (s *HTTPServer) get(w http.ResponseWriter, r *http.Request) {
-	key := r.URL.Query().Get("key")
-	val, ok := s.Node.Store.Get(key)
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	io.WriteString(w, val)
-}
-
-func (s *HTTPServer) set(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Key   string `json:"key"`
-		Value string `json:"value"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+// handleQuery handles incoming HTTP requests for the /query endpoint
+// ie: a POST request with a JSON body like {"q": "SET key value"}
+// will apply the command to the Raft log and return a response
+func (s *HTTPServer) handleQuery(c *gin.Context) {
+	var req QueryRequest
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
 		return
 	}
 
-	cmd := map[string]string{
-		"op":    "set",
-		"key":   req.Key,
-		"value": req.Value,
-	}
-	data, _ := json.Marshal(cmd)
-	f := s.Node.Raft.Apply(data, 5*time.Second)
-	if err := f.Error(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
-}
-
-func (s *HTTPServer) delete(w http.ResponseWriter, r *http.Request) {
-	key := r.URL.Query().Get("key")
-
-	cmd := map[string]string{
-		"op":  "delete",
-		"key": key,
-	}
-	data, _ := json.Marshal(cmd)
-	f := s.Node.Raft.Apply(data, 5*time.Second)
-	if err := f.Error(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-	}
-}
-
-func (s *HTTPServer) join(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		ID   string `json:"id"`
-		Addr string `json:"addr"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid join request", http.StatusBadRequest)
-		return
-	}
-
-	err := s.Node.Raft.AddVoter(raft.ServerID(req.ID), raft.ServerAddress(req.Addr), 0, 0).Error()
+	query, err := parser.ParseQuery(req.Q)
 	if err != nil {
-		http.Error(w, "failed to add voter: "+err.Error(), http.StatusInternalServerError)
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// dispatch to Raft or KVS
+	switch query.Op {
+	case "set", "delete":
+		cmd := db.Command{
+			Op:    query.Op,
+			Key:   query.Key,
+			Value: query.Value,
+		}
+		data, _ := json.Marshal(cmd)
+		f := s.node.Raft.Apply(data, 5*time.Second)
+		if err := f.Error(); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(200, gin.H{"status": "ok"})
+	case "get":
+		value, ok := s.node.Store.Get(query.Key)
+		if !ok {
+			c.JSON(404, gin.H{"error": "not found"})
+			return
+		}
+		c.JSON(200, gin.H{"value": value})
+	case "info":
+		c.JSON(200, gin.H{
+			"id":     s.node.Raft.String(),
+			"leader": s.node.Raft.Leader(),
+			"state":  s.node.Raft.State().String(),
+		})
+	default:
+		c.JSON(400, gin.H{"error": "unsupported op"})
 	}
 }

@@ -28,3 +28,6 @@ logs/
 coverage/
 *.tgz
 .pnpm-debug.log
+
+# Database files
+/data/
